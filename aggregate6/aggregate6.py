@@ -37,7 +37,6 @@ except:
 from ipaddress import ip_network, ip_interface
 
 import aggregate6
-import radix
 import sys
 
 
@@ -51,66 +50,34 @@ def aggregate(l):
     >>> aggregate(["10.0.0.0/8", "10.0.0.0/24"])
     ['10.0.0.0/8']
     """
-    tree = radix.Radix()
-    for item in l:
-        try:
-            tree.add(item)
-        except (ValueError) as err:
-            raise Exception("ERROR: invalid IP prefix: {}".format(item))
-
-    return aggregate_tree(tree).prefixes()
+    return list(_aggregate_set(sorted(l)))
 
 
-def aggregate_tree(l_tree):
-    """Walk a py-radix tree and aggregate it.
-
-    Arguments
-    l_tree -- radix.Radix() object
-    """
-
-    def _aggregate_phase1(tree):
-        # phase1 removes any supplied prefixes which are superfluous because
-        # they are already included in another supplied prefix. For example,
-        # 2001:67c:208c:10::/64 would be removed if 2001:67c:208c::/48 was
-        # also supplied.
-        n_tree = radix.Radix()
-        for prefix in tree.prefixes():
-            if tree.search_worst(prefix).prefix == prefix:
-                n_tree.add(prefix)
-        return n_tree
-
-    def _aggregate_phase2(tree):
-        # phase2 identifies adjacent prefixes that can be combined under a
-        # single, shorter-length prefix. For example, 2001:67c:208c::/48 and
-        # 2001:67c:208d::/48 can be combined into the single prefix
-        # 2001:67c:208c::/47.
-        n_tree = radix.Radix()
-        for rnode in tree:
-            p = text(ip_network(text(rnode.prefix)).supernet())
-            r = tree.search_covered(p)
-            if len(r) == 2:
-                if r[0].prefixlen == r[1].prefixlen == rnode.prefixlen:
-                    n_tree.add(p)
-                else:
-                    n_tree.add(rnode.prefix)
+def _aggregate_set(l):
+    nets = set()
+    for prefix in l:
+        net = ip_network(prefix, strict = False)
+        thisnet = net
+        subnet = None
+        while thisnet != subnet:
+            if thisnet in nets:
+                break
             else:
-                n_tree.add(rnode.prefix)
-        return n_tree
-
-    l_tree = _aggregate_phase1(l_tree)
-
-    if len(l_tree.prefixes()) == 1:
-        return l_tree
-
-    while True:
-        r_tree = _aggregate_phase2(l_tree)
-        if l_tree.prefixes() == r_tree.prefixes():
-            break
+                subnet = thisnet
+                thisnet = thisnet.supernet()
         else:
-            l_tree = r_tree
-            del r_tree
+            add_net(nets, net)
+    return nets
 
-    return l_tree
+
+def add_net(nets, net):
+    supernet = net.supernet()
+    the_other = next(x for x in supernet.subnets() if x != net)
+    if the_other in nets:
+        nets.remove(the_other)
+        add_net(nets,supernet)
+    else:
+        nets.add(net)
 
 
 def parse_args(args):
@@ -150,7 +117,7 @@ def main():
         print("aggregate6 %s" % aggregate6.__version__)
         sys.exit()
 
-    p_tree = radix.Radix()
+    input = set()
 
     for line in fileinput.input(args.args):
         if not line.strip(): # pragma: no cover
@@ -172,23 +139,22 @@ ignoring.\n" % elem.strip())
                     continue
 
             if args.ipv4_only and prefix_obj.version == 4:
-                p_tree.add(prefix)
+                input.add(prefix)
             elif args.ipv6_only and prefix_obj.version == 6:
-                p_tree.add(prefix)
+                input.add(prefix)
             elif not args.ipv4_only and not args.ipv6_only:
-                p_tree.add(prefix)
+                input.add(prefix)
 
     if args.verbose:
-        input_list = p_tree.prefixes()
-        output_list = aggregate_tree(p_tree).prefixes()
-        for p in sorted(set(input_list + output_list)):
-            if p in input_list and p not in output_list:
+        output = _aggregate_set(sorted(input))
+        for p in sorted(set(input + output)):
+            if p in input and p not in output:
                 print("- ", end='')
-            elif p in output_list and p not in input_list:
+            elif p in output and p not in input:
                 print("+ ", end='')
             else:
                 print("  ", end='')
             print(p)
     else:
-        for prefix in aggregate_tree(p_tree).prefixes():
+        for prefix in sorted(aggregate(input)):
             print(prefix)
